@@ -1,17 +1,47 @@
 const express = require("express");
 const cors = require("cors");
-const app = express();
-require("dotenv").config();
+const cookieParser = require("cookie-parser");
 const { MongoClient, ServerApiVersion } = require("mongodb");
+require("dotenv").config();
 
-app.use(cors());
-app.use(express.json());
-
+const app = express();
 const port = process.env.PORT || 5000;
 
+// *******************
+// 1. CORS Configuration (Critical for JWT via Cookies)
+// *******************
+// Client side domains allowed to access the server
+const allowedOrigins = [
+  "http://localhost:5173",
+  // Live deployment URLs can be added here
+  // 'https://your-garments-tracker-client.netlify.app',
+];
+
+app.use(
+  cors({
+    origin: (origin, callback) => {
+      if (!origin || allowedOrigins.includes(origin)) {
+        callback(null, true);
+      } else {
+        callback(new Error("Not allowed by CORS"));
+      }
+    },
+    methods: "GET,HEAD,PUT,PATCH,POST,DELETE",
+    credentials: true,
+  })
+);
+
+// *******************
+// 2. Middleware Setup
+// *******************
+app.use(express.json());
+app.use(cookieParser());
+
+// *******************
+// 3. MongoDB Connection
+// *******************
 const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@skghosh.wrzjkjg.mongodb.net/?appName=Skghosh`;
 
-// Create a MongoClient with a MongoClientOptions object to set the Stable API version
 const client = new MongoClient(uri, {
   serverApi: {
     version: ServerApiVersion.v1,
@@ -22,23 +52,22 @@ const client = new MongoClient(uri, {
 
 async function run() {
   try {
-    // Connect the client to the server	(optional starting in v4.7)
     await client.connect();
-    // Send a ping to confirm a successful connection
+    console.log("MongoDB successfully connected!");
+
+    // Database and Collections
+    const database = client.db("garmentsTrackerDB");
+    const usersCollection = database.collection("users");
+    const productsCollection = database.collection("products");
+    const ordersCollection = database.collection("orders");
+
     await client.db("admin").command({ ping: 1 });
-    console.log(
-      "Pinged your deployment. You successfully connected to MongoDB!"
-    );
   } catch (error) {
     console.error("MongoDB connection error:", error);
   }
 }
 run().catch(console.dir);
 
-app.get("/", (req, res) => {
-  res.send("Hello World!");
-});
-
 app.listen(port, () => {
-  console.log(`Server started on port ${port}`);
+  console.log(`Garments Tracker Server started on port ${port}`);
 });
