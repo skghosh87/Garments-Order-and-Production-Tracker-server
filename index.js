@@ -73,24 +73,29 @@ async function run() {
       res.send(result);
     });
 
-    // ২. JWT এবং রোল চেক করার এপিআই (৪0৪ এরর এবং ভুল রোল সমস্যার সমাধান)
+    // 2. Check the jwt and role api (Fixing 404 error and wrong role issue)
     app.post("/api/v1/auth/jwt", async (req, res) => {
       const user = req.body;
-      // ডাটাবেস থেকে ইউজারের আসল রোল খুঁজে বের করা
+      // Get the actual role from the database
       const userData = await usersCollection.findOne({ email: user.email });
 
-      // টোকেন জেনারেশন লজিক (jwt ইমপোর্ট করা থাকতে হবে উপরে)
+      // Token Generation logic
       const token = jwt.sign(user, process.env.ACCESS_TOKEN_SECRET, {
         expiresIn: "1h",
       });
 
-      // রোলসহ রেসপন্স পাঠানো
+      // Response with token and user role
       res.send({
         success: true,
-        role: userData?.role || "Buyer", // ডাটাবেসে যা আছে তাই দেখাবে
+        role: userData?.role || "Buyer",
       });
     });
 
+    // 3. Logout API (Cookie Clearing)
+    app.post("/api/v1/auth/logout", async (req, res) => {
+      res.send({ success: true });
+    });
+    //................................................
     await client.db("admin").command({ ping: 1 });
   } catch (error) {
     console.error("MongoDB connection error:", error);
