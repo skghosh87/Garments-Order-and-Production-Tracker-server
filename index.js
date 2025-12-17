@@ -141,6 +141,31 @@ async function run() {
         res.status(500).send({ message: "Error deleting product", error });
       }
     });
+    // 9. প্রোডাক্ট আপডেট (Update) করার এপিআই
+    app.put("/api/v1/products/:id", async (req, res) => {
+      const id = req.params.id;
+      const filter = { _id: new ObjectId(id) };
+      const updatedProduct = req.body;
+
+      const updateDoc = {
+        $set: {
+          name: updatedProduct.name,
+          category: updatedProduct.category,
+          price: updatedProduct.price,
+          minOrderQty: updatedProduct.minOrderQty,
+          description: updatedProduct.description,
+          image: updatedProduct.image,
+          status: updatedProduct.status || "active",
+        },
+      };
+
+      try {
+        const result = await productsCollection.updateOne(filter, updateDoc);
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ message: "Error updating product", error });
+      }
+    });
     //................................................
     await client.db("admin").command({ ping: 1 });
   } catch (error) {
