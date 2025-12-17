@@ -60,7 +60,17 @@ async function run() {
     const usersCollection = database.collection("users");
     const productsCollection = database.collection("products");
     const ordersCollection = database.collection("orders");
-
+    //User apis
+    app.post("/api/v1/users", async (req, res) => {
+      const user = req.body;
+      const query = { email: user.email };
+      const existingUser = await usersCollection.findOne(query);
+      if (existingUser) {
+        return res.send({ message: "user already exists", insertedId: null });
+      }
+      const result = await usersCollection.insertOne(user);
+      res.send(result);
+    });
     await client.db("admin").command({ ping: 1 });
   } catch (error) {
     console.error("MongoDB connection error:", error);
