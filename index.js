@@ -2,7 +2,7 @@ const express = require("express");
 const cors = require("cors");
 const jwt = require("jsonwebtoken");
 const cookieParser = require("cookie-parser");
-const { MongoClient, ServerApiVersion } = require("mongodb");
+const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
 require("dotenv").config();
 
 const app = express();
@@ -96,19 +96,50 @@ async function run() {
       res.send({ success: true });
     });
 
-    // 4. Get User Role API (For AuthProvider Error Fix)
+    // 4. Get User Role & Status API (সংশোধিত)
     app.get("/api/v1/users/role/:email", async (req, res) => {
       const email = req.params.email;
       const user = await usersCollection.findOne({ email: email });
 
-      // ডাটাবেসে ইউজার থাকলে তার রোল পাঠাবে, না থাকলে 'Buyer' পাঠাবে
-      res.send({ role: user?.role || "Buyer" });
+      // রোল এবং স্ট্যাটাস দুটোই পাঠানো জরুরি (RoleBasedRoute এর জন্য)
+      res.send({
+        role: user?.role || "Buyer",
+        status: user?.status || "verified",
+      });
     });
 
-    // 5. প্রোডাক্ট লিস্ট API (এটি না থাকলে OurProducts এ ৪0৪ দেখাবে)
+    // 5. প্রোডাক্ট অ্যাড করার এপিআই (Error Handling সহ)
+    app.post("/api/v1/products", async (req, res) => {
+      try {
+        const product = req.body;
+        const result = await productsCollection.insertOne(product);
+        // ফ্রন্টএন্ড insertedId চেক করে, তাই পুরো রেজাল্ট পাঠানোই ভালো
+        res.send(result);
+      } catch (error) {
+        console.error("Insert Error:", error);
+        res.status(500).send({ message: "Internal Server Error" });
+      }
+    });
+
+    // 6. প্রোডাক্ট লিস্ট API (এটি না থাকলে OurProducts এ ৪0৪ দেখাবে)
     app.get("/api/v1/products", async (req, res) => {
       const result = await productsCollection.find().limit(6).toArray();
       res.send(result);
+    });
+    // ==========================================
+    // Product Management APIs (Update & Delete)
+    // ==========================================
+
+    // 7. নির্দিষ্ট প্রোডাক্ট ডিলিট করার এপিআই
+    app.delete("/api/v1/products/:id", async (req, res) => {
+      const id = req.params.id;
+      const query = { _id: new ObjectId(id) };
+      try {
+        const result = await productsCollection.deleteOne(query);
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ message: "Error deleting product", error });
+      }
     });
     //................................................
     await client.db("admin").command({ ping: 1 });
