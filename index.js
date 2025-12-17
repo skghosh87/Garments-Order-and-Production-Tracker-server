@@ -1,5 +1,6 @@
 const express = require("express");
 const cors = require("cors");
+const jwt = require("jsonwebtoken");
 const cookieParser = require("cookie-parser");
 const { MongoClient, ServerApiVersion } = require("mongodb");
 require("dotenv").config();
@@ -60,7 +61,7 @@ async function run() {
     const usersCollection = database.collection("users");
     const productsCollection = database.collection("products");
     const ordersCollection = database.collection("orders");
-    //User apis
+    //1. User save apis
     app.post("/api/v1/users", async (req, res) => {
       const user = req.body;
       const query = { email: user.email };
@@ -71,6 +72,25 @@ async function run() {
       const result = await usersCollection.insertOne(user);
       res.send(result);
     });
+
+    // ২. JWT এবং রোল চেক করার এপিআই (৪0৪ এরর এবং ভুল রোল সমস্যার সমাধান)
+    app.post("/api/v1/auth/jwt", async (req, res) => {
+      const user = req.body;
+      // ডাটাবেস থেকে ইউজারের আসল রোল খুঁজে বের করা
+      const userData = await usersCollection.findOne({ email: user.email });
+
+      // টোকেন জেনারেশন লজিক (jwt ইমপোর্ট করা থাকতে হবে উপরে)
+      const token = jwt.sign(user, process.env.ACCESS_TOKEN_SECRET, {
+        expiresIn: "1h",
+      });
+
+      // রোলসহ রেসপন্স পাঠানো
+      res.send({
+        success: true,
+        role: userData?.role || "Buyer", // ডাটাবেসে যা আছে তাই দেখাবে
+      });
+    });
+
     await client.db("admin").command({ ping: 1 });
   } catch (error) {
     console.error("MongoDB connection error:", error);
