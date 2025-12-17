@@ -95,6 +95,21 @@ async function run() {
     app.post("/api/v1/auth/logout", async (req, res) => {
       res.send({ success: true });
     });
+
+    // 4. Get User Role API (For AuthProvider Error Fix)
+    app.get("/api/v1/users/role/:email", async (req, res) => {
+      const email = req.params.email;
+      const user = await usersCollection.findOne({ email: email });
+
+      // ডাটাবেসে ইউজার থাকলে তার রোল পাঠাবে, না থাকলে 'Buyer' পাঠাবে
+      res.send({ role: user?.role || "Buyer" });
+    });
+
+    // 5. প্রোডাক্ট লিস্ট API (এটি না থাকলে OurProducts এ ৪0৪ দেখাবে)
+    app.get("/api/v1/products", async (req, res) => {
+      const result = await productsCollection.find().limit(6).toArray();
+      res.send(result);
+    });
     //................................................
     await client.db("admin").command({ ping: 1 });
   } catch (error) {
