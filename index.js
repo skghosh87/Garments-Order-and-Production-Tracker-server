@@ -93,13 +93,10 @@ async function run() {
     app.post("/api/v1/auth/jwt", async (req, res) => {
       const user = req.body;
       const userData = await usersCollection.findOne({ email: user.email });
-
-      // টোকেনের ভেতরে ইমেইল এবং রোল সেভ করা হচ্ছে (সিকিউরিটির জন্য)
       const tokenPayload = {
         email: user.email,
-        role: userData?.role || "Buyer",
+        role: userData?.role || "buyer",
       };
-
       const token = jwt.sign(tokenPayload, process.env.ACCESS_TOKEN_SECRET, {
         expiresIn: "1h",
       });
@@ -110,13 +107,10 @@ async function run() {
           secure: process.env.NODE_ENV === "production",
           sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
         })
-        .send({
-          success: true,
-          role: userData?.role || "Buyer",
-        });
+        .send({ success: true, role: userData?.role || "buyer" });
     });
 
-    app.post("/api/v1/auth/logout", async (req, res) => {
+    app.post("/api/v1/auth/logout", (req, res) => {
       res.clearCookie("token", { maxAge: 0 }).send({ success: true });
     });
 
