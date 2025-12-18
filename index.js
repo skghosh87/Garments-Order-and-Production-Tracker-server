@@ -2,29 +2,24 @@ const express = require("express");
 const cors = require("cors");
 const jwt = require("jsonwebtoken");
 const cookieParser = require("cookie-parser");
-const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
+const { MongoClient, ObjectId, ServerApiVersion } = require("mongodb");
 require("dotenv").config();
 
 const app = express();
 const port = process.env.PORT || 5000;
 
-/* =====================================================
-   1. MIDDLEWARES
-===================================================== */
+/* ===================== MIDDLEWARE ===================== */
 app.use(
   cors({
     origin: ["http://localhost:5173", "https://your-garments-tracker.web.app"],
     credentials: true,
   })
 );
-
 app.use(express.json());
 app.use(cookieParser());
 
-/* =====================================================
-   2. MONGODB CONNECTION
-===================================================== */
-const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@skghosh.wrzjkjg.mongodb.net/?appName=Skghosh`;
+/* ===================== MONGODB ===================== */
+const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@cluster0.mongodb.net/?retryWrites=true&w=majority`;
 
 const client = new MongoClient(uri, {
   serverApi: {
@@ -34,19 +29,15 @@ const client = new MongoClient(uri, {
   },
 });
 
-/* =====================================================
-   3. JWT MIDDLEWARES
-===================================================== */
-const verifyToken = (req, res, next) => {
-  const token = req?.cookies?.token;
-  if (!token) {
-    return res.status(401).send({ message: "Unauthorized access" });
-  }
+let usersCollection, productsCollection, ordersCollection, trackingCollection;
+
+/* ===================== JWT MIDDLEWARE ===================== */
+const verifyJWT = (req, res, next) => {
+  const token = req.cookies?.token;
+  if (!token) return res.status(401).send({ message: "Unauthorized" });
 
   jwt.verify(token, process.env.ACCESS_TOKEN_SECRET, (err, decoded) => {
-    if (err) {
-      return res.status(401).send({ message: "Unauthorized access" });
-    }
+    if (err) return res.status(403).send({ message: "Forbidden" });
     req.user = decoded;
     next();
   });
@@ -54,40 +45,43 @@ const verifyToken = (req, res, next) => {
 
 const verifyAdmin = async (req, res, next) => {
   const user = await usersCollection.findOne({ email: req.user.email });
-  if (user?.role?.toLowerCase() !== "admin") {
-    return res.status(403).send({ message: "Admins only" });
-  }
+  if (!user || user.role !== "admin")
+    return res.status(403).send({ message: "Admin only" });
+  if (user.status === "suspended")
+    return res.status(403).send({ message: "Account suspended" });
   next();
 };
 
-/* =====================================================
-   4. MAIN FUNCTION
-===================================================== */
-let usersCollection;
-let productsCollection;
-let ordersCollection;
-let messagesCollection;
+const verifyManager = async (req, res, next) => {
+  const user = await usersCollection.findOne({ email: req.user.email });
+  if (!user || user.role !== "manager")
+    return res.status(403).send({ message: "Manager only" });
+  if (user.status === "suspended")
+    return res.status(403).send({ message: "Account suspended" });
+  next();
+};
 
+/* ===================== MAIN ===================== */
 async function run() {
   try {
     await client.connect();
-    console.log("✅ MongoDB connected");
-
     const db = client.db("garmentsTrackerDB");
+
     usersCollection = db.collection("users");
     productsCollection = db.collection("products");
     ordersCollection = db.collection("orders");
-    messagesCollection = db.collection("messages");
+    trackingCollection = db.collection("tracking");
 
     /* ================= AUTH ================= */
     app.post("/api/v1/auth/jwt", async (req, res) => {
       const { email } = req.body;
       const user = await usersCollection.findOne({ email });
-      const role = user?.role || "Buyer";
 
-      const token = jwt.sign({ email, role }, process.env.ACCESS_TOKEN_SECRET, {
-        expiresIn: "365d",
-      });
+      const token = jwt.sign(
+        { email, role: user?.role || "buyer" },
+        process.env.ACCESS_TOKEN_SECRET,
+        { expiresIn: "7d" }
+      );
 
       res
         .cookie("token", token, {
@@ -95,7 +89,7 @@ async function run() {
           secure: process.env.NODE_ENV === "production",
           sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
         })
-        .send({ success: true, role });
+        .send({ success: true });
     });
 
     app.post("/api/v1/auth/logout", (req, res) => {
@@ -109,117 +103,153 @@ async function run() {
 
     /* ================= USERS ================= */
     app.post("/api/v1/users", async (req, res) => {
-      const user = req.body;
-      const exists = await usersCollection.findOne({ email: user.email });
-      if (exists) {
-        return res.send({ message: "User already exists" });
-      }
-      const result = await usersCollection.insertOne({
-        ...user,
-        role: "Buyer",
-        status: "verified",
+      const exists = await usersCollection.findOne({ email: req.body.email });
+      if (exists) return res.send({ message: "User already exists" });
+
+      const user = {
+        ...req.body,
+        role: "buyer",
+        status: "pending",
+        suspendReason: "",
+        suspendFeedback: "",
         createdAt: new Date(),
-      });
-      res.send(result);
+      };
+      res.send(await usersCollection.insertOne(user));
     });
 
-    app.get("/api/v1/users/role/:email", async (req, res) => {
-      const user = await usersCollection.findOne({ email: req.params.email });
-      res.send({
-        role: user?.role || "Buyer",
-        status: user?.status || "verified",
-      });
-    });
-
-    app.get("/api/v1/users", verifyToken, verifyAdmin, async (req, res) => {
-      const users = await usersCollection.find().toArray();
-      res.send(users);
+    app.get("/api/v1/users", verifyJWT, verifyAdmin, async (req, res) => {
+      res.send(await usersCollection.find().toArray());
     });
 
     app.patch(
       "/api/v1/users/role/:id",
-      verifyToken,
+      verifyJWT,
       verifyAdmin,
       async (req, res) => {
-        const result = await usersCollection.updateOne(
-          { _id: new ObjectId(req.params.id) },
-          { $set: { role: req.body.role } }
+        res.send(
+          await usersCollection.updateOne(
+            { _id: new ObjectId(req.params.id) },
+            { $set: { role: req.body.role } }
+          )
         );
-        res.send(result);
+      }
+    );
+
+    app.patch(
+      "/api/v1/users/suspend/:id",
+      verifyJWT,
+      verifyAdmin,
+      async (req, res) => {
+        res.send(
+          await usersCollection.updateOne(
+            { _id: new ObjectId(req.params.id) },
+            {
+              $set: {
+                status: "suspended",
+                suspendReason: req.body.reason,
+                suspendFeedback: req.body.feedback,
+              },
+            }
+          )
+        );
       }
     );
 
     /* ================= PRODUCTS ================= */
-    app.post("/api/v1/products", verifyToken, async (req, res) => {
-      const role = req.user.role.toLowerCase();
-      if (role !== "admin" && role !== "manager") {
-        return res.status(403).send({ message: "Forbidden" });
-      }
-
+    app.post("/api/v1/products", verifyJWT, verifyManager, async (req, res) => {
       const product = {
         ...req.body,
         price: Number(req.body.price),
         quantity: Number(req.body.quantity),
         minOrderQty: Number(req.body.minOrderQty),
-        addedBy: req.user.email,
+        createdBy: req.user.email,
         createdAt: new Date(),
       };
-
-      const result = await productsCollection.insertOne(product);
-      res.send(result);
+      res.send(await productsCollection.insertOne(product));
     });
 
     app.get("/api/v1/products", async (req, res) => {
-      const { limit } = req.query;
-      const cursor = productsCollection.find();
-      if (limit) cursor.limit(Number(limit));
-      const result = await cursor.toArray();
-      res.send(result);
+      const page = Number(req.query.page) || 1;
+      const limit = Number(req.query.limit) || 10;
+      const skip = (page - 1) * limit;
+
+      const products = await productsCollection
+        .find()
+        .skip(skip)
+        .limit(limit)
+        .toArray();
+      res.send(products);
     });
 
     /* ================= ORDERS ================= */
-    app.post("/api/v1/orders", verifyToken, async (req, res) => {
+    app.post("/api/v1/orders", verifyJWT, async (req, res) => {
+      const product = await productsCollection.findOne({
+        _id: new ObjectId(req.body.productId),
+      });
+
+      if (req.body.quantity < product.minOrderQty)
+        return res
+          .status(400)
+          .send({ message: "Below minimum order quantity" });
+
+      if (req.body.quantity > product.quantity)
+        return res.status(400).send({ message: "Insufficient stock" });
+
       const order = {
         ...req.body,
         buyerEmail: req.user.email,
         status: "pending",
         createdAt: new Date(),
-        trackingHistory: [{ status: "Order Placed", time: new Date() }],
       };
-      const result = await ordersCollection.insertOne(order);
-      res.send(result);
+
+      res.send(await ordersCollection.insertOne(order));
     });
 
-    app.get("/api/v1/orders/my-orders", verifyToken, async (req, res) => {
-      const email = req.user.email;
-      const query = { userEmail: email };
-      const result = await ordersCollection.find(query).toArray();
-      res.send(result);
+    app.get("/api/v1/orders/my", verifyJWT, async (req, res) => {
+      res.send(
+        await ordersCollection.find({ buyerEmail: req.user.email }).toArray()
+      );
     });
 
-    app.get("/api/v1/orders", verifyToken, verifyAdmin, async (req, res) => {
-      const result = await ordersCollection.find().toArray();
-      res.send(result);
-    });
+    /* ================= TRACKING ================= */
+    app.post(
+      "/api/v1/tracking/:orderId",
+      verifyJWT,
+      verifyManager,
+      async (req, res) => {
+        res.send(
+          await trackingCollection.updateOne(
+            { orderId: req.params.orderId },
+            {
+              $push: {
+                steps: {
+                  ...req.body,
+                  time: new Date(),
+                },
+              },
+            },
+            { upsert: true }
+          )
+        );
+      }
+    );
 
-    /* ================= CONTACT ================= */
-    app.post("/api/v1/contact", async (req, res) => {
-      const result = await messagesCollection.insertOne({
-        ...req.body,
-        createdAt: new Date(),
-      });
-      res.send(result);
+    app.get("/api/v1/tracking/:orderId", verifyJWT, async (req, res) => {
+      res.send(
+        await trackingCollection.findOne({ orderId: req.params.orderId })
+      );
     });
 
     app.get("/", (req, res) => res.send("🚀 Garments Tracker API Running"));
-  } catch (error) {
-    console.error(error);
+  } finally {
   }
 }
 
 run();
 
-/* =====================================================
-   5. SERVER LISTEN
-===================================================== */
+/* ===================== ERROR HANDLER ===================== */
+app.use((err, req, res, next) => {
+  res.status(500).send({ message: "Internal Server Error" });
+});
+
 app.listen(port, () => console.log(`🚀 Server running on port ${port}`));
