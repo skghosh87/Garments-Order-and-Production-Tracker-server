@@ -72,6 +72,20 @@ async function run() {
       }
       next();
     };
+
+    // verifyStatus: ইউজার সাসপেন্ডেড কি না চেক করার জন্য
+    const verifyStatus = async (req, res, next) => {
+      const email = req.user.email;
+      const user = await usersCollection.findOne({ email: email });
+      if (user?.status === "suspended") {
+        return res.status(403).send({
+          message: "Account Suspended",
+          feedback: user.feedback,
+        });
+      }
+      next();
+    };
+
     // ==========================================
     // 1. Authentication & JWT APIs
     // ==========================================
