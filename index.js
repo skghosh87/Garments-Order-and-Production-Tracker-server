@@ -9,25 +9,11 @@ const app = express();
 const port = process.env.PORT || 5000;
 
 // *******************
-// 1. CORS Configuration (Critical for JWT via Cookies)
+// 1. CORS Configuration
 // *******************
-// Client side domains allowed to access the server
-const allowedOrigins = [
-  "http://localhost:5173",
-  // Live deployment URLs can be added here
-  // 'https://your-garments-tracker-client.netlify.app',
-];
-
 app.use(
   cors({
-    origin: (origin, callback) => {
-      if (!origin || allowedOrigins.includes(origin)) {
-        callback(null, true);
-      } else {
-        callback(new Error("Not allowed by CORS"));
-      }
-    },
-    methods: "GET,HEAD,PUT,PATCH,POST,DELETE",
+    origin: ["http://localhost:5173", "https://your-production-link.com"], // আপনার লাইভ লিঙ্ক এখানে দিন
     credentials: true,
   })
 );
@@ -51,17 +37,79 @@ const client = new MongoClient(uri, {
   },
 });
 
+// ==========================================
+// Middlewares (Verify Token, Admin, Status)
+// ==========================================
+const verifyToken = (req, res, next) => {
+  const token = req?.cookies?.token;
+  if (!token) {
+    return res.status(401).send({ message: "Unauthorized access" });
+  }
+  jwt.verify(token, process.env.ACCESS_TOKEN_SECRET, (err, decoded) => {
+    if (err) {
+      return res.status(401).send({ message: "Unauthorized access" });
+    }
+    req.user = decoded;
+    next();
+  });
+};
+
 async function run() {
   try {
-    await client.connect();
+    // await client.connect(); // Production এ এটি না দিলেও চলে, তবে কানেকশন নিশ্চিত করে
     console.log("MongoDB successfully connected!");
 
-    // Database and Collections
     const database = client.db("garmentsTrackerDB");
     const usersCollection = database.collection("users");
     const productsCollection = database.collection("products");
     const ordersCollection = database.collection("orders");
-    //1. User save apis
+    // verifyAdmin: অ্যাডমিন কিনা চেক করার জন্য
+    const verifyAdmin = async (req, res, next) => {
+      const email = req.user.email;
+      const user = await usersCollection.findOne({ email: email });
+      if (user?.role !== "admin") {
+        return res.status(403).send({ message: "Forbidden Access" });
+      }
+      next();
+    };
+    // ==========================================
+    // 1. Authentication & JWT APIs
+    // ==========================================
+
+    app.post("/api/v1/auth/jwt", async (req, res) => {
+      const user = req.body;
+      const userData = await usersCollection.findOne({ email: user.email });
+
+      // টোকেনের ভেতরে ইমেইল এবং রোল সেভ করা হচ্ছে (সিকিউরিটির জন্য)
+      const tokenPayload = {
+        email: user.email,
+        role: userData?.role || "Buyer",
+      };
+
+      const token = jwt.sign(tokenPayload, process.env.ACCESS_TOKEN_SECRET, {
+        expiresIn: "1h",
+      });
+
+      res
+        .cookie("token", token, {
+          httpOnly: true,
+          secure: process.env.NODE_ENV === "production",
+          sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
+        })
+        .send({
+          success: true,
+          role: userData?.role || "Buyer",
+        });
+    });
+
+    app.post("/api/v1/auth/logout", async (req, res) => {
+      res.clearCookie("token", { maxAge: 0 }).send({ success: true });
+    });
+
+    // ==========================================
+    // 2. User & Profile APIs
+    // ==========================================
+
     app.post("/api/v1/users", async (req, res) => {
       const user = req.body;
       const query = { email: user.email };
@@ -73,107 +121,106 @@ async function run() {
       res.send(result);
     });
 
-    // 2. Check the jwt and role api (Fixing 404 error and wrong role issue)
-    app.post("/api/v1/auth/jwt", async (req, res) => {
-      const user = req.body;
-      // Get the actual role from the database
-      const userData = await usersCollection.findOne({ email: user.email });
-
-      // Token Generation logic
-      const token = jwt.sign(user, process.env.ACCESS_TOKEN_SECRET, {
-        expiresIn: "1h",
-      });
-
-      // Response with token and user role
-      res.send({
-        success: true,
-        role: userData?.role || "Buyer",
-      });
-    });
-
-    // 3. Logout API (Cookie Clearing)
-    app.post("/api/v1/auth/logout", async (req, res) => {
-      res.send({ success: true });
-    });
-
-    // 4. Get User Role & Status API (সংশোধিত)
     app.get("/api/v1/users/role/:email", async (req, res) => {
       const email = req.params.email;
       const user = await usersCollection.findOne({ email: email });
-
-      // রোল এবং স্ট্যাটাস দুটোই পাঠানো জরুরি (RoleBasedRoute এর জন্য)
       res.send({
         role: user?.role || "Buyer",
         status: user?.status || "verified",
       });
     });
 
-    // 5. প্রোডাক্ট অ্যাড করার এপিআই (Error Handling সহ)
-    app.post("/api/v1/products", async (req, res) => {
-      try {
-        const product = req.body;
-        const result = await productsCollection.insertOne(product);
-        // ফ্রন্টএন্ড insertedId চেক করে, তাই পুরো রেজাল্ট পাঠানোই ভালো
-        res.send(result);
-      } catch (error) {
-        console.error("Insert Error:", error);
-        res.status(500).send({ message: "Internal Server Error" });
-      }
-    });
+    // প্রোফাইল আপডেট এপিআই (আপনার নতুন রিকোয়েস্ট অনুযায়ী)
+    app.patch("/api/v1/users/update-profile", verifyToken, async (req, res) => {
+      const { email, displayName, photoURL } = req.body;
+      const requesterEmail = req.user.email;
+      const requesterRole = req.user.role;
 
-    // 6. প্রোডাক্ট লিস্ট API (এটি না থাকলে OurProducts এ ৪0৪ দেখাবে)
-    app.get("/api/v1/products", async (req, res) => {
-      const result = await productsCollection.find().limit(6).toArray();
+      // সিকিউরিটি: অ্যাডমিন সবার টা পারে, অন্যরা শুধু নিজের টা
+      if (requesterRole !== "admin" && requesterEmail !== email) {
+        return res.status(403).send({ message: "Forbidden Access" });
+      }
+
+      const filter = { email: email };
+      const updatedDoc = {
+        $set: { displayName, photoURL },
+      };
+      const result = await usersCollection.updateOne(filter, updatedDoc);
       res.send(result);
     });
+
     // ==========================================
-    // Product Management APIs (Update & Delete)
+    // 3. Product Management APIs
     // ==========================================
 
-    // 7. নির্দিষ্ট প্রোডাক্ট ডিলিট করার এপিআই
-    app.delete("/api/v1/products/:id", async (req, res) => {
-      const id = req.params.id;
-      const query = { _id: new ObjectId(id) };
-      try {
-        const result = await productsCollection.deleteOne(query);
-        res.send(result);
-      } catch (error) {
-        res.status(500).send({ message: "Error deleting product", error });
-      }
+    app.get("/api/v1/products", async (req, res) => {
+      const result = await productsCollection.find().toArray();
+      res.send(result);
     });
-    // 9. প্রোডাক্ট আপডেট (Update) করার এপিআই
-    app.put("/api/v1/products/:id", async (req, res) => {
+
+    app.post("/api/v1/products", verifyToken, async (req, res) => {
+      const product = req.body;
+      const result = await productsCollection.insertOne(product);
+      res.send(result);
+    });
+
+    app.put("/api/v1/products/:id", verifyToken, async (req, res) => {
       const id = req.params.id;
       const filter = { _id: new ObjectId(id) };
       const updatedProduct = req.body;
+      const requesterEmail = req.user.email;
+      const requesterRole = req.user.role;
 
-      const updateDoc = {
-        $set: {
-          name: updatedProduct.name,
-          category: updatedProduct.category,
-          price: updatedProduct.price,
-          minOrderQty: updatedProduct.minOrderQty,
-          description: updatedProduct.description,
-          image: updatedProduct.image,
-          status: updatedProduct.status || "active",
-        },
-      };
+      const product = await productsCollection.findOne(filter);
 
-      try {
+      // সিকিউরিটি চেক
+      if (requesterRole === "admin" || product?.addedBy === requesterEmail) {
+        const updateDoc = {
+          $set: {
+            name: updatedProduct.name,
+            category: updatedProduct.category,
+            price: updatedProduct.price,
+            minOrderQty: updatedProduct.minOrderQty,
+            description: updatedProduct.description,
+            image: updatedProduct.image,
+            status: updatedProduct.status || "active",
+          },
+        };
         const result = await productsCollection.updateOne(filter, updateDoc);
         res.send(result);
-      } catch (error) {
-        res.status(500).send({ message: "Error updating product", error });
+      } else {
+        res.status(403).send({ message: "Forbidden: Not your product" });
       }
     });
-    //................................................
+
+    app.delete("/api/v1/products/:id", verifyToken, async (req, res) => {
+      const id = req.params.id;
+      const requesterEmail = req.user.email;
+      const requesterRole = req.user.role;
+
+      const filter = { _id: new ObjectId(id) };
+      const product = await productsCollection.findOne(filter);
+
+      if (requesterRole === "admin" || product?.addedBy === requesterEmail) {
+        const result = await productsCollection.deleteOne(filter);
+        res.send(result);
+      } else {
+        res.status(403).send({ message: "Forbidden Access" });
+      }
+    });
+
+    // পিন কমান্ড টেস্ট
     await client.db("admin").command({ ping: 1 });
-  } catch (error) {
-    console.error("MongoDB connection error:", error);
+  } finally {
+    // client.close() এখানে দেওয়ার প্রয়োজন নেই
   }
 }
 run().catch(console.dir);
 
+app.get("/", (req, res) => {
+  res.send("Garments Tracker Server is running...");
+});
+
 app.listen(port, () => {
-  console.log(`Garments Tracker Server started on port ${port}`);
+  console.log(`Server started on port ${port}`);
 });
