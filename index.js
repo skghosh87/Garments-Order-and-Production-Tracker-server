@@ -333,22 +333,51 @@ async function run() {
 ===================================================== */
     app.get("/api/v1/products", async (req, res) => {
       try {
-        const isHome = req.query.home === "true"; // হোম পেজের জন্য কি না
-        const limit = parseInt(req.query.limit) || 0; // লিমিট কত (০ মানে সব)
+        const isHome = req.query.home === "true";
+        const limit = parseInt(req.query.limit) || 0;
 
         let query = {};
         if (isHome) {
-          query.showOnHome = true; // শুধু যেগুলো হোমে দেখানোর কথা
+          // যদি ডাটাবেসে showOnHome ফিল্ডটি না থাকে, তবে এটি শুধু limit(6) দিয়ে ডাটা আনবে
+          // অথবা আপনি আপনার মতো করে নির্দিষ্ট ফিল্টার রাখতে পারেন
+          query = { showOnHome: true };
         }
 
         const result = await productCollection
           .find(query)
+          .sort({ _id: -1 }) // নতুন প্রোডাক্টগুলো আগে দেখানোর জন্য
           .limit(limit)
           .toArray();
 
         res.send(result);
       } catch (error) {
         res.status(500).send({ message: "Error fetching products" });
+      }
+    });
+
+    // ২. প্রোডাক্ট ডিটেইলস এন্ডপয়েন্ট
+    app.get("/api/v1/products/:id", async (req, res) => {
+      try {
+        const id = req.params.id;
+
+        // আইডি ভ্যালিড কি না তা চেক করা
+        if (!ObjectId.isValid(id)) {
+          return res.status(400).send({ message: "Invalid Product ID" });
+        }
+
+        const query = { _id: new ObjectId(id) };
+
+        // আপনার প্রোডাক্ট কালেকশনের নাম এখানে ব্যবহার করুন (ধরা যাক productCollection)
+        const result = await productCollection.findOne(query);
+
+        if (!result) {
+          return res.status(404).send({ message: "Product not found" });
+        }
+
+        res.send(result);
+      } catch (error) {
+        console.error("Error fetching product details:", error);
+        res.status(500).send({ message: "Internal Server Error" });
       }
     });
     // 3. প্রোডাক্ট ডিলিট করার রুট (DELETE)
@@ -567,6 +596,48 @@ async function run() {
       }
     });
 
+    // 5. একটি নির্দিষ্ট অর্ডারের তথ্য ট্র্যাক করার জন্য
+    app.get("/api/v1/orders/:id", verifyToken, async (req, res) => {
+      try {
+        const id = req.params.id;
+
+        // ১. চেক করা আইডিটি মঙ্গোডিবি ফরম্যাটে সঠিক কি না
+        if (!ObjectId.isValid(id)) {
+          return res.status(400).send({ message: "Invalid Order ID format" });
+        }
+
+        const query = { _id: new ObjectId(id) };
+
+        // ২. ডাটাবেস থেকে অর্ডারটি খোঁজা (ordersCollection আপনার ডিক্লেয়ার করা নাম অনুযায়ী)
+        const result = await ordersCollection.findOne(query);
+
+        if (!result) {
+          return res.status(404).send({ message: "Order not found" });
+        }
+
+        // ৩. সিকিউরিটি চেক: শুধুমাত্র অ্যাডমিন অথবা যে বায়ার অর্ডার করেছেন তিনি দেখতে পারবেন
+        // (যদি আপনি আরও কঠোর সিকিউরিটি চান তবে নিচের অংশটি ব্যবহার করুন)
+        /*
+    if (req.user.role !== 'admin' && req.user.email !== result.userEmail) {
+      return res.status(403).send({ message: "Unauthorized access to this order" });
+    }
+    */
+
+        res.send(result);
+      } catch (error) {
+        console.error("Order Tracking Error:", error);
+        res.status(500).send({ message: "Internal server error" });
+      }
+    });
+    // বুকিং সেভ করার এন্ডপয়েন্ট
+    app.post("/api/v1/bookings", async (req, res) => {
+      const bookingData = req.body;
+
+      // আপনার বুকিং কালেকশনের নাম এখানে ব্যবহার করুন
+      const result = await bookingCollection.insertOne(bookingData);
+
+      res.send(result);
+    });
     console.log("Server API is ready");
   } finally {
   }
