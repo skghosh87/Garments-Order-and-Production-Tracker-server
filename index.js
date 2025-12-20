@@ -2,25 +2,34 @@ const express = require("express");
 const cors = require("cors");
 const jwt = require("jsonwebtoken");
 const cookieParser = require("cookie-parser");
-const { MongoClient, ObjectId, ServerApiVersion } = require("mongodb");
+const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
 require("dotenv").config();
 
 const app = express();
 const port = process.env.PORT || 5000;
 
-/* ===================== MIDDLEWARE ===================== */
+/* =====================================================
+   1. MIDDLEWARES
+===================================================== */
 app.use(
   cors({
-    origin: ["http://localhost:5173", "https://your-garments-tracker.web.app"],
+    origin: [
+      "http://localhost:5173",
+      "https://your-client-site.web.app", // production
+    ],
     credentials: true,
   })
 );
+
 app.use(express.json());
 app.use(cookieParser());
 
-/* ===================== MONGODB ===================== */
-const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@cluster0.mongodb.net/?retryWrites=true&w=majority`;
+/* =====================================================
+   2. MONGODB CONNECTION
+===================================================== */
+const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@skghosh.wrzjkjg.mongodb.net/?appName=Skghosh`;
 
+// Create a MongoClient with a MongoClientOptions object to set the Stable API version
 const client = new MongoClient(uri, {
   serverApi: {
     version: ServerApiVersion.v1,
@@ -29,59 +38,41 @@ const client = new MongoClient(uri, {
   },
 });
 
-let usersCollection, productsCollection, ordersCollection, trackingCollection;
-
-/* ===================== JWT MIDDLEWARE ===================== */
-const verifyJWT = (req, res, next) => {
-  const token = req.cookies?.token;
-  if (!token) return res.status(401).send({ message: "Unauthorized" });
-
-  jwt.verify(token, process.env.ACCESS_TOKEN_SECRET, (err, decoded) => {
-    if (err) return res.status(403).send({ message: "Forbidden" });
-    req.user = decoded;
-    next();
-  });
-};
-
-const verifyAdmin = async (req, res, next) => {
-  const user = await usersCollection.findOne({ email: req.user.email });
-  if (!user || user.role !== "admin")
-    return res.status(403).send({ message: "Admin only" });
-  if (user.status === "suspended")
-    return res.status(403).send({ message: "Account suspended" });
-  next();
-};
-
-const verifyManager = async (req, res, next) => {
-  const user = await usersCollection.findOne({ email: req.user.email });
-  if (!user || user.role !== "manager")
-    return res.status(403).send({ message: "Manager only" });
-  if (user.status === "suspended")
-    return res.status(403).send({ message: "Account suspended" });
-  next();
-};
-
-/* ===================== MAIN ===================== */
 async function run() {
   try {
     await client.connect();
+    console.log(
+      "Pinged your deployment. You successfully connected to MongoDB!"
+    );
+
     const db = client.db("garmentsTrackerDB");
+    const usersCollection = db.collection("users");
+    const productCollection = db.collection("products");
+    const ordersCollection = db.collection("orders");
 
-    usersCollection = db.collection("users");
-    productsCollection = db.collection("products");
-    ordersCollection = db.collection("orders");
-    trackingCollection = db.collection("tracking");
+    /* =====================================================
+       3. JWT & AUTH
+    ===================================================== */
 
-    /* ================= AUTH ================= */
+    // 🔐 Generate JWT
     app.post("/api/v1/auth/jwt", async (req, res) => {
       const { email } = req.body;
+
       const user = await usersCollection.findOne({ email });
 
-      const token = jwt.sign(
-        { email, role: user?.role || "buyer" },
-        process.env.ACCESS_TOKEN_SECRET,
-        { expiresIn: "7d" }
-      );
+      if (!user) {
+        return res.status(401).send({ message: "User not found" });
+      }
+
+      const payload = {
+        email: user.email,
+        role: user.role,
+        status: user.status,
+      };
+
+      const token = jwt.sign(payload, process.env.ACCESS_TOKEN_SECRET, {
+        expiresIn: "7d",
+      });
 
       res
         .cookie("token", token, {
@@ -89,167 +80,507 @@ async function run() {
           secure: process.env.NODE_ENV === "production",
           sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
         })
-        .send({ success: true });
+        .send({
+          success: true,
+          user: {
+            email: user.email,
+            role: user.role,
+            status: user.status,
+          },
+        });
     });
 
+    // 🚪 Logout
     app.post("/api/v1/auth/logout", (req, res) => {
       res
         .clearCookie("token", {
+          httpOnly: true,
           secure: process.env.NODE_ENV === "production",
           sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
+          maxAge: 0,
         })
         .send({ success: true });
     });
 
-    /* ================= USERS ================= */
-    app.post("/api/v1/users", async (req, res) => {
-      const exists = await usersCollection.findOne({ email: req.body.email });
-      if (exists) return res.send({ message: "User already exists" });
+    /* =====================================================
+       4. AUTH MIDDLEWARES
+    ===================================================== */
 
-      const user = {
-        ...req.body,
-        role: "buyer",
+    const verifyToken = async (req, res, next) => {
+      const token = req.cookies?.token;
+      if (!token) {
+        return res
+          .status(401)
+          .send({ message: "Unauthorized: No token provided" });
+      }
+
+      jwt.verify(
+        token,
+        process.env.ACCESS_TOKEN_SECRET,
+        async (err, decoded) => {
+          if (err) {
+            return res
+              .status(401)
+              .send({ message: "Invalid or expired token" });
+          }
+
+          const user = await usersCollection.findOne({ email: decoded.email });
+
+          req.user = { ...decoded, status: user?.status };
+          next();
+        }
+      );
+    };
+
+    const verifyAdmin = async (req, res, next) => {
+      if (req.user?.role?.toLowerCase() !== "admin") {
+        return res.status(403).send({ message: "Forbidden: Admin only" });
+      }
+      next();
+    };
+
+    // ম্যানেজার কি না তা যাচাই করা
+    const verifyManager = async (req, res, next) => {
+      const email = req.user?.email;
+      const query = { email: email };
+      const user = await usersCollection.findOne(query); // আপনার ইউজার কালেকশন থেকে
+
+      if (user?.role?.toLowerCase() !== "manager") {
+        return res.status(403).send({ message: "Forbidden: Managers only" });
+      }
+      next();
+    };
+
+    /* =====================================================
+       5. USERS API
+    ===================================================== */
+
+    // ➕ Save user on Register
+    app.post("/api/v1/users", async (req, res) => {
+      const user = req.body;
+
+      const exists = await usersCollection.findOne({ email: user.email });
+      if (exists) {
+        return res.send({ message: "User already exists" });
+      }
+
+      const newUser = {
+        ...user,
+        role: user.role || "buyer",
         status: "pending",
-        suspendReason: "",
-        suspendFeedback: "",
         createdAt: new Date(),
       };
-      res.send(await usersCollection.insertOne(user));
+
+      const result = await usersCollection.insertOne(newUser);
+      res.send(result);
     });
 
-    app.get("/api/v1/users", verifyJWT, verifyAdmin, async (req, res) => {
-      res.send(await usersCollection.find().toArray());
-    });
+    // 🔍 Get user role & status
+    app.get("/api/v1/users/role/:email", async (req, res) => {
+      const email = req.params.email;
 
+      const user = await usersCollection.findOne({ email });
+
+      if (!user) {
+        return res.send({ role: "buyer", status: "pending" });
+      }
+
+      res.send({
+        role: user.role,
+        status: user.status,
+        suspensionReason: user.suspensionReason || "",
+        suspensionFeedback: user.suspensionFeedback || "",
+      });
+    });
+    /* =====================================================
+   Admin: Manage User Roles & Status
+===================================================== */
+
+    // ১. ইউজারের রোল পরিবর্তন করার রুট
     app.patch(
       "/api/v1/users/role/:id",
-      verifyJWT,
+      verifyToken,
       verifyAdmin,
       async (req, res) => {
-        res.send(
-          await usersCollection.updateOne(
-            { _id: new ObjectId(req.params.id) },
-            { $set: { role: req.body.role } }
-          )
-        );
+        const id = req.params.id;
+        const { role } = req.body;
+        const filter = { _id: new ObjectId(id) };
+        const updateDoc = {
+          $set: { role: role },
+        };
+        const result = await usersCollection.updateOne(filter, updateDoc);
+        res.send(result);
       }
     );
 
+    // ২. ইউজারকে সাসপেন্ড করার রুট (Reason ও Feedback সহ)
     app.patch(
       "/api/v1/users/suspend/:id",
-      verifyJWT,
+      verifyToken,
       verifyAdmin,
       async (req, res) => {
-        res.send(
-          await usersCollection.updateOne(
-            { _id: new ObjectId(req.params.id) },
-            {
-              $set: {
-                status: "suspended",
-                suspendReason: req.body.reason,
-                suspendFeedback: req.body.feedback,
-              },
-            }
-          )
-        );
+        const id = req.params.id;
+        const { reason, feedback } = req.body;
+        const filter = { _id: new ObjectId(id) };
+        const updateDoc = {
+          $set: {
+            status: "suspended",
+            suspensionReason: reason,
+            suspensionFeedback: feedback,
+          },
+        };
+        const result = await usersCollection.updateOne(filter, updateDoc);
+        res.send(result);
       }
     );
+    /* =====================================================
+   Admin: Get All Users (ManageUsers.jsx এর জন্য)
+===================================================== */
+    app.get("/api/v1/users", verifyToken, verifyAdmin, async (req, res) => {
+      try {
+        const search = req.query.search || "";
 
-    /* ================= PRODUCTS ================= */
-    app.post("/api/v1/products", verifyJWT, verifyManager, async (req, res) => {
-      const product = {
-        ...req.body,
-        price: Number(req.body.price),
-        quantity: Number(req.body.quantity),
-        minOrderQty: Number(req.body.minOrderQty),
-        createdBy: req.user.email,
-        createdAt: new Date(),
-      };
-      res.send(await productsCollection.insertOne(product));
+        // সার্চ কোয়েরি তৈরি করা (নাম বা ইমেইল দিয়ে সার্চ করার জন্য)
+        const query = {
+          $or: [
+            { displayName: { $regex: search, $options: "i" } },
+            { email: { $regex: search, $options: "i" } },
+          ],
+        };
+
+        const result = await usersCollection.find(query).toArray();
+        res.send(result);
+      } catch (error) {
+        console.error("Error fetching users:", error);
+        res.status(500).send({ message: "Internal server error" });
+      }
     });
+    /* =====================================================
+   User: Update Profile (displayName & photoURL)
+===================================================== */
+    app.patch("/api/v1/users/update-profile", verifyToken, async (req, res) => {
+      try {
+        const { email, displayName, photoURL } = req.body;
 
-    app.get("/api/v1/products", async (req, res) => {
-      const page = Number(req.query.page) || 1;
-      const limit = Number(req.query.limit) || 10;
-      const skip = (page - 1) * limit;
+        // সাসপেন্ডেড ইউজার কিনা চেক করা (নিরাপত্তার জন্য)
+        const user = await usersCollection.findOne({ email: email });
+        if (user?.status === "suspended") {
+          return res
+            .status(403)
+            .send({ message: "Suspended accounts cannot update profile." });
+        }
 
-      const products = await productsCollection
-        .find()
-        .skip(skip)
-        .limit(limit)
-        .toArray();
-      res.send(products);
+        const filter = { email: email };
+        const updateDoc = {
+          $set: {
+            displayName: displayName,
+            photoURL: photoURL,
+          },
+        };
+
+        const result = await usersCollection.updateOne(filter, updateDoc);
+        res.send({ success: true, modifiedCount: result.modifiedCount });
+      } catch (error) {
+        res.status(500).send({ message: "Failed to update profile" });
+      }
     });
-
-    /* ================= ORDERS ================= */
-    app.post("/api/v1/orders", verifyJWT, async (req, res) => {
-      const product = await productsCollection.findOne({
-        _id: new ObjectId(req.body.productId),
+    /* =====================================================
+       6. TEST PROTECTED ROUTE
+    ===================================================== */
+    app.get("/api/v1/protected", verifyToken, (req, res) => {
+      res.send({
+        message: "Protected route access success",
+        user: req.user,
       });
-
-      if (req.body.quantity < product.minOrderQty)
-        return res
-          .status(400)
-          .send({ message: "Below minimum order quantity" });
-
-      if (req.body.quantity > product.quantity)
-        return res.status(400).send({ message: "Insufficient stock" });
-
-      const order = {
-        ...req.body,
-        buyerEmail: req.user.email,
-        status: "pending",
-        createdAt: new Date(),
-      };
-
-      res.send(await ordersCollection.insertOne(order));
     });
 
-    app.get("/api/v1/orders/my", verifyJWT, async (req, res) => {
-      res.send(
-        await ordersCollection.find({ buyerEmail: req.user.email }).toArray()
-      );
-    });
-
-    /* ================= TRACKING ================= */
+    /* =====================================================
+       8. Product Route 
+    ===================================================== */
+    // 1. প্রোডাক্ট যোগ করার পোস্ট রুট
     app.post(
-      "/api/v1/tracking/:orderId",
-      verifyJWT,
+      "/api/v1/products",
+      verifyToken,
       verifyManager,
       async (req, res) => {
-        res.send(
-          await trackingCollection.updateOne(
-            { orderId: req.params.orderId },
-            {
-              $push: {
-                steps: {
-                  ...req.body,
-                  time: new Date(),
-                },
-              },
-            },
-            { upsert: true }
-          )
-        );
+        try {
+          const product = req.body;
+
+          if (!product.name || !product.price || !product.quantity) {
+            return res.status(400).send({ message: "Missing required fields" });
+          }
+
+          const result = await productCollection.insertOne(product);
+          res.status(201).send(result);
+        } catch (error) {
+          console.error("Error adding product:", error);
+          res.status(500).send({ message: "Internal server error" });
+        }
       }
     );
 
-    app.get("/api/v1/tracking/:orderId", verifyJWT, async (req, res) => {
-      res.send(
-        await trackingCollection.findOne({ orderId: req.params.orderId })
-      );
+    // 2. সকল প্রোডাক্ট পাওয়ার রুট (GET)
+    app.get("/api/v1/products", async (req, res) => {
+      try {
+        const result = await productCollection.find().toArray();
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ message: "Error fetching products" });
+      }
+    });
+    /* =====================================================
+   প্রোডাক্ট পাওয়ার রুট (Filter & Limit সহ)
+===================================================== */
+    app.get("/api/v1/products", async (req, res) => {
+      try {
+        const isHome = req.query.home === "true"; // হোম পেজের জন্য কি না
+        const limit = parseInt(req.query.limit) || 0; // লিমিট কত (০ মানে সব)
+
+        let query = {};
+        if (isHome) {
+          query.showOnHome = true; // শুধু যেগুলো হোমে দেখানোর কথা
+        }
+
+        const result = await productCollection
+          .find(query)
+          .limit(limit)
+          .toArray();
+
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ message: "Error fetching products" });
+      }
+    });
+    // 3. প্রোডাক্ট ডিলিট করার রুট (DELETE)
+    app.delete(
+      "/api/v1/products/:id",
+      verifyToken,
+      verifyManager,
+      async (req, res) => {
+        try {
+          const id = req.params.id;
+          const query = { _id: new ObjectId(id) };
+          const result = await productCollection.deleteOne(query);
+          res.send(result);
+        } catch (error) {
+          res.status(500).send({ message: "Error deleting product" });
+        }
+      }
+    );
+
+    // 4. প্রোডাক্ট আপডেট করার রুট (PUT)
+    app.put(
+      "/api/v1/products/:id",
+      verifyToken,
+      verifyManager,
+      async (req, res) => {
+        try {
+          const id = req.params.id;
+          const filter = { _id: new ObjectId(id) };
+          const updatedProduct = req.body;
+
+          const updateDoc = {
+            $set: {
+              name: updatedProduct.name,
+              price: updatedProduct.price,
+              quantity: updatedProduct.quantity,
+              category: updatedProduct.category,
+              description: updatedProduct.description,
+              image: updatedProduct.image,
+            },
+          };
+
+          const result = await productCollection.updateOne(filter, updateDoc);
+          res.send(result);
+        } catch (error) {
+          res.status(500).send({ message: "Error updating product" });
+        }
+      }
+    );
+    //Patch API to update product
+    app.patch("/api/v1/products/:id", verifyToken, async (req, res) => {
+      try {
+        const id = req.params.id;
+        const filter = { _id: new ObjectId(id) };
+        const data = req.body;
+
+        const updatedDoc = {
+          $set: {
+            name: data.name,
+            price: parseFloat(data.price),
+            quantity: parseInt(data.quantity), // আপনার ডাটাবেস ফিল্ড
+            category: data.category,
+            addedBy: data.addedBy,
+            image: data.image,
+          },
+        };
+
+        // এখানে নিশ্চিত করুন নামটি productCollection (আপনার ডিক্লারেশন অনুযায়ী)
+        const result = await productCollection.updateOne(filter, updatedDoc);
+
+        if (result.matchedCount === 0) {
+          return res.status(404).send({ message: "Product not found" });
+        }
+
+        res.send(result);
+      } catch (error) {
+        console.error("Update Error:", error);
+        res.status(500).send({ message: "Server Error: " + error.message });
+      }
+    });
+    /* =====================================================
+       8. Orders Route 
+    ===================================================== */
+    app.post("/api/v1/orders", verifyToken, async (req, res) => {
+      // চেক করুন ইউজার সাসপেন্ডেড কি না
+      if (req.user.status === "suspended") {
+        return res.status(403).send({
+          message: "Your account is suspended. You cannot place new orders.",
+        });
+      }
+
+      const orderData = req.body;
+      const result = await ordersCollection.insertOne(orderData);
+      res.send(result);
+    });
+    // Get Api to fetch all orders
+    app.get("/api/v1/orders", verifyToken, async (req, res) => {
+      const result = await ordersCollection.find().toArray();
+      res.send(result);
+    });
+    /* =====================================================
+   Admin/Manager: Update Order Status
+===================================================== */
+    app.patch("/api/v1/orders/status/:id", verifyToken, async (req, res) => {
+      try {
+        const id = req.params.id;
+        const { status } = req.body;
+        const filter = { _id: new ObjectId(id) };
+
+        // স্ট্যাটাস পরিবর্তনের সাথে সাথে একটি ট্র্যাকিং হিস্ট্রি যোগ করা (অপশনাল কিন্তু ভালো)
+        const updateDoc = {
+          $set: {
+            status: status,
+            updatedAt: new Date(),
+          },
+          $push: {
+            trackingHistory: {
+              status: status,
+              time: new Date(),
+            },
+          },
+        };
+
+        const result = await ordersCollection.updateOne(filter, updateDoc);
+
+        if (result.modifiedCount > 0) {
+          res.send({ success: true, modifiedCount: result.modifiedCount });
+        } else {
+          res
+            .status(404)
+            .send({ message: "Order not found or no changes made" });
+        }
+      } catch (error) {
+        console.error("Order Status Update Error:", error);
+        res.status(500).send({ message: "Internal server error" });
+      }
     });
 
-    app.get("/", (req, res) => res.send("🚀 Garments Tracker API Running"));
+    // বায়ারের নিজস্ব অর্ডার খোঁজার এপিআই
+    app.get("/api/v1/orders/my-orders", verifyToken, async (req, res) => {
+      const email = req.user.email; // লগইন করা ইউজারের ইমেইল
+      // ডাটাবেসে userEmail ফিল্ডের সাথে মেলাতে হবে
+      const query = { userEmail: email };
+      const result = await ordersCollection.find(query).toArray();
+      res.send(result);
+    });
+    // 2. ✅ অনুমোদিত (Approved) অর্ডারগুলো পাওয়ার রুট
+    app.get("/api/v1/orders/approved", verifyToken, async (req, res) => {
+      try {
+        const email = req.user.email;
+        const role = req.user.role?.toLowerCase();
+
+        let query = { status: "approved" };
+
+        // যদি ইউজার ম্যানেজার হয়, তবে শুধু তার নিজের যোগ করা প্রোডাক্টের অর্ডারগুলো দেখবে
+        if (role === "manager") {
+          query.managerEmail = email;
+          // নোট: অর্ডার সেভ করার সময় প্রোডাক্ট যে ম্যানেজারের, তার ইমেইলটি 'managerEmail' ফিল্ডে সেভ থাকতে হবে।
+        }
+
+        // অ্যাডমিন হলে উপরের query-তে কোনো পরিবর্তন আসবে না, তাই সে সব দেখতে পাবে।
+        const result = await ordersCollection.find(query).toArray();
+        res.send(result);
+      } catch (error) {
+        console.error("Error fetching approved orders:", error);
+        res.status(500).send({ message: "Error fetching approved orders" });
+      }
+    });
+
+    // 3. পেন্ডিং অর্ডারগুলো পাওয়া (ম্যানেজার বা অ্যাডমিনের জন্য)
+    app.get("/api/v1/orders/pending", verifyToken, async (req, res) => {
+      try {
+        const email = req.user.email;
+        const role = req.user.role?.toLowerCase();
+
+        let query = { status: "pending" };
+
+        // ম্যানেজার হলে শুধু তার প্রোডাক্টির পেন্ডিং অর্ডার দেখবে
+        if (role === "manager") {
+          query.managerEmail = email;
+        }
+
+        const result = await ordersCollection.find(query).toArray();
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ message: "Error fetching pending orders" });
+      }
+    });
+
+    // 4. অর্ডার স্ট্যাটাস আপডেট (Approve অথবা Reject)
+    // আমরা একটি ডাইনামিক রুট ব্যবহার করছি action (approve/reject) এবং id অনুযায়ী
+    app.patch("/api/v1/orders/:action/:id", verifyToken, async (req, res) => {
+      try {
+        const id = req.params.id;
+        const action = req.params.action; // এটি 'approve' অথবা 'reject' হবে
+
+        const filter = { _id: new ObjectId(id) };
+        let updatedStatus = "";
+
+        if (action === "approve") {
+          updatedStatus = "approved";
+        } else if (action === "reject") {
+          updatedStatus = "rejected";
+        } else {
+          return res.status(400).send({ message: "Invalid action" });
+        }
+
+        const updateDoc = {
+          $set: { status: updatedStatus },
+        };
+
+        const result = await ordersCollection.updateOne(filter, updateDoc);
+        res.send(result);
+      } catch (error) {
+        console.error("Status Update Error:", error);
+        res.status(500).send({ message: "Failed to update order status" });
+      }
+    });
+
+    console.log("Server API is ready");
   } finally {
   }
 }
 
-run();
+run().catch(console.dir);
 
-/* ===================== ERROR HANDLER ===================== */
-app.use((err, req, res, next) => {
-  res.status(500).send({ message: "Internal Server Error" });
+/* =====================================================
+   7. ROOT
+===================================================== */
+app.get("/", (req, res) => {
+  res.send("Garments Order & Production Tracker API Running");
 });
 
-app.listen(port, () => console.log(`🚀 Server running on port ${port}`));
+app.listen(port, () => {
+  console.log(`Garments Order Tracker Server running on port ${port}`);
+});
