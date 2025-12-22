@@ -1,9 +1,10 @@
+require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
 const jwt = require("jsonwebtoken");
 const cookieParser = require("cookie-parser");
+const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
 const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
-require("dotenv").config();
 
 const app = express();
 const port = process.env.PORT || 5000;
@@ -250,6 +251,52 @@ async function run() {
         res.send(result);
       }
     );
+    // PUT বা PATCH: অ্যাডমিন এবং ম্যানেজার উভয়েই যেন আপডেট করতে পারে
+    app.patch(
+      "/api/v1/products/:id",
+      verifyToken,
+
+      async (req, res) => {
+        const id = req.params.id;
+        const body = req.body;
+        const filter = { _id: new ObjectId(id) };
+
+        const updatedDoc = {
+          $set: {
+            name: body.name,
+            price: body.price,
+            category: body.category,
+            description: body.description,
+            videoUrl: body.videoUrl,
+            paymentOptions: body.paymentOptions, // ফ্রন্টএন্ডের ড্রপডাউন থেকে আসা ভ্যালু
+            image: body.image,
+            updatedAt: new Date(),
+          },
+        };
+
+        try {
+          const result = await productCollection.updateOne(filter, updatedDoc);
+          res.send(result);
+        } catch (error) {
+          res.status(500).send({ message: "Update failed", error });
+        }
+      }
+    );
+    app.patch(
+      "/api/v1/products/toggle-home/:id",
+      verifyToken,
+      verifyAdmin,
+      async (req, res) => {
+        const id = req.params.id;
+        const { showOnHome } = req.body;
+        const filter = { _id: new ObjectId(id) };
+        const updateDoc = {
+          $set: { showOnHome: showOnHome },
+        };
+        const result = await productCollection.updateOne(filter, updateDoc);
+        res.send(result);
+      }
+    );
 
     app.delete(
       "/api/v1/products/:id",
@@ -347,6 +394,11 @@ async function run() {
           },
         }
       );
+      res.send(result);
+    });
+    app.get("/api/v1/orders/details/:id", verifyToken, async (req, res) => {
+      const id = req.params.id;
+      const result = await ordersCollection.findOne({ _id: new ObjectId(id) });
       res.send(result);
     });
     // Track Order by ID
@@ -465,18 +517,85 @@ async function run() {
         }
       }
     );
+    // অ্যাডমিন সব অর্ডার দেখবে (Verify Admin নিশ্চিত করবেন)
+    app.get(
+      "/api/v1/admin/all-orders",
+      verifyToken,
+      verifyAdmin,
+      async (req, res) => {
+        const result = await ordersCollection
+          .find()
+          .sort({ createdAt: -1 })
+          .toArray();
+        res.send(result);
+      }
+    );
     /* =====================================================
        7. PAYMENTS (STRIPE)
     ===================================================== */
-    const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
-    app.post("/api/v1/create-payment-intent", verifyToken, async (req, res) => {
-      const amount = parseInt(req.body.price * 100);
-      const paymentIntent = await stripe.paymentIntents.create({
-        amount,
-        currency: "usd",
-        payment_method_types: ["card"],
-      });
-      res.send({ clientSecret: paymentIntent.client_secret });
+    /**
+     * ১. পেমেন্ট ইনটেন্ট তৈরি করা
+     * ফ্রন্টএন্ড থেকে আসা প্রাইস অনুযায়ী এটি একটি Secret Key জেনারেট করে
+     */
+    app.post("/api/v1/create-payment-intent", async (req, res) => {
+      try {
+        const { price } = req.body;
+
+        // স্ট্রাইপ সেন্ট (Cents) হিসেবে টাকা গ্রহণ করে, তাই ১০০ দিয়ে গুণ করতে হয়
+        const amount = parseInt(price * 100);
+
+        if (!price || amount < 1) {
+          return res.status(400).send({ message: "Invalid price" });
+        }
+
+        const paymentIntent = await stripe.paymentIntents.create({
+          amount: amount,
+          currency: "usd",
+          payment_method_types: ["card"],
+        });
+
+        res.send({
+          clientSecret: paymentIntent.client_secret,
+        });
+      } catch (error) {
+        console.error("Payment Intent Error:", error);
+        res.status(500).send({ error: error.message });
+      }
+    });
+
+    /**
+     * ২. অর্ডারের পেমেন্ট স্ট্যাটাস আপডেট করা (PATCH)
+     * পেমেন্ট সফল হওয়ার পর ফ্রন্টএন্ড থেকে এই এপিআই কল করা হয়
+     */
+    app.patch("/api/v1/orders/payment/:id", async (req, res) => {
+      try {
+        const id = req.params.id;
+        const paymentData = req.body; // এতে থাকবে transactionId এবং status
+
+        const filter = { _id: new ObjectId(id) };
+        const updateDoc = {
+          $set: {
+            status: "Paid",
+            transactionId: paymentData.transactionId,
+            paymentDate: paymentData.paymentDate || new Date(),
+            paymentMethod: "Stripe",
+          },
+        };
+
+        const result = await ordersCollection.updateOne(filter, updateDoc);
+
+        if (result.modifiedCount > 0) {
+          res.send({ success: true, modifiedCount: result.modifiedCount });
+        } else {
+          res.status(404).send({
+            success: false,
+            message: "Order not found or already updated",
+          });
+        }
+      } catch (error) {
+        console.error("Update Payment Error:", error);
+        res.status(500).send({ error: error.message });
+      }
     });
 
     /* =====================================================
