@@ -46,33 +46,69 @@ async function run() {
     const usersCollection = db.collection("users");
     const productCollection = db.collection("products");
     const ordersCollection = db.collection("orders");
-    const bookingCollection = db.collection("bookings"); // Missing কালেকশনটি যুক্ত করা হলো
 
     /* =====================================================
        3. AUTH & JWT MIDDLEWARES
     ===================================================== */
     const verifyToken = async (req, res, next) => {
-      const token = req.cookies?.token;
-      if (!token) return res.status(401).send({ message: "Unauthorized" });
+      try {
+        const token = req.cookies?.token;
 
-      jwt.verify(
-        token,
-        process.env.ACCESS_TOKEN_SECRET,
-        async (err, decoded) => {
-          if (err) return res.status(401).send({ message: "Invalid token" });
-
-          // ✅ ডাটাবেজ থেকে লেটেস্ট রোল আনা হচ্ছে
-          const user = await usersCollection.findOne({ email: decoded.email });
-          if (!user) return res.status(404).send({ message: "User not found" });
-
-          req.user = {
-            email: user.email,
-            role: user.role, // "Buyer" or "Manager"
-            status: user.status,
-          };
-          next();
+        // ১. টোকেন না থাকলে সরাসরি রির্টান
+        if (!token) {
+          return res
+            .status(401)
+            .send({ message: "Unauthorized access - No token found" });
         }
-      );
+
+        // ২. JWT ভেরিফিকেশন (Error handling সহ)
+        jwt.verify(
+          token,
+          process.env.ACCESS_TOKEN_SECRET,
+          async (err, decoded) => {
+            if (err) {
+              // যদি টোকেনের মেয়াদ শেষ হয়ে যায় (Expired)
+              if (err.name === "TokenExpiredError") {
+                return res
+                  .status(401)
+                  .send({ message: "Token expired. Please login again." });
+              }
+              // অন্য কোনো কারণে টোকেন ইনভ্যালিড হলে
+              return res
+                .status(403)
+                .send({ message: "Forbidden - Invalid token" });
+            }
+
+            // ৩. ডাটাবেজ থেকে লেটেস্ট তথ্য আনা (Try-catch এর ভেতরে)
+            try {
+              const user = await usersCollection.findOne({
+                email: decoded.email,
+              });
+              if (!user) {
+                return res
+                  .status(404)
+                  .send({ message: "User not found in database" });
+              }
+
+              // ৪. রিকোয়েস্ট অবজেক্টে ডাটা সেট করা
+              req.user = {
+                email: user.email,
+                role: user.role,
+                status: user.status,
+              };
+
+              next(); // সফল হলে পরবর্তী ধাপে যাবে
+            } catch (dbError) {
+              console.error("Database error in verifyToken:", dbError);
+              res.status(500).send({ message: "Internal Server Error" });
+            }
+          }
+        );
+      } catch (error) {
+        // যেকোনো অপ্রত্যাশিত এরর হ্যান্ডেল করবে যাতে সার্ভার বন্ধ না হয়
+        console.error("Critical error in verifyToken middleware:", error);
+        res.status(500).send({ message: "Authentication process failed" });
+      }
     };
 
     const verifyAdmin = async (req, res, next) => {
