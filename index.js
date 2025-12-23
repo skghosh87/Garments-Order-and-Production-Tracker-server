@@ -16,7 +16,7 @@ app.use(
   cors({
     origin: [
       "http://localhost:5173",
-      "https://your-client-site.web.app", // production URL
+      "https://assignment11-garments-tracker.netlify.app", // production URL
     ],
     credentials: true,
   })
